@@ -1,0 +1,5 @@
+[core]
+    remote = minio
+['remote "minio"']
+    url = s3://dms-dvc/
+    endpointurl = https://minio.ad.water.ca.gov:9000
