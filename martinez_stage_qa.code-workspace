@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../Delta/_git_repos/vtools3"
+		},
+		{
+			"path": "D:/Delta/_git_repos/vtools3"
+		}
+	],
+	"settings": {
+		"iis.activeFolder": "martinez_stage_qa"
+	}
+}

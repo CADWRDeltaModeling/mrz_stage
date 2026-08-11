@@ -1,0 +1,5 @@
+outs:
+- md5: ae32e9f49684187309f92f4bdbdf1c47
+  size: 113643264
+  hash: md5
+  path: mrzastro_1920_2035.csv

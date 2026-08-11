@@ -1,0 +1,5 @@
+outs:
+- md5: 2afcb69caf966deeb021f34507233aec
+  size: 24577594
+  hash: md5
+  path: dms_mrz_cleaned_1990_2017.csv
