@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from dms_datastore import read_ts
+from dms_datastore.read_ts import read_ts
 from vtools import cosine_lanczos
 from vtools.functions.neighbor_fill import fill_from_neighbor, load_dfm_params
 
