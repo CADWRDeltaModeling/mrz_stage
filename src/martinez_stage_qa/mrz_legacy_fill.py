@@ -7,7 +7,7 @@ from dms_datastore import read_ts
 from vtools import cosine_lanczos
 from vtools.functions.neighbor_fill import fill_from_neighbor, load_dfm_params
 
-import paths
+from . import paths
 
 # Approximate time when NOAA transition complete. Contains overlap period.
 NOAA_START = pd.Timestamp("2014-05-10")

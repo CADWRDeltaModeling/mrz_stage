@@ -19,7 +19,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from vtools.functions.transition import transition_ts
 
-import paths
+from . import paths
 
 # Transition window
 TRANSITION_START = "2013-12-20"

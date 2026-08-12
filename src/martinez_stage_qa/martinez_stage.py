@@ -34,7 +34,7 @@ from vtools.functions.filter import cosine_lanczos  # assume present; fail hard 
 from vtools.functions.neighbor_fill import fill_from_neighbor
 from vtools.data.gap import gap_count
 
-import paths
+from . import paths
 
 
 # ----------------------------

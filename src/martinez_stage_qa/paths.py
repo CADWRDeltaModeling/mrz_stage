@@ -8,7 +8,10 @@ ephemeral ``session_data/``):
     Frozen, deployable, version-controlled artifacts: the harmonic source, the
     hand-cleaned legacy record, the DFM parameters, and the frozen pre-2014
     legacy fill. Never cleared automatically; the legacy fill is only rewritten
-    on an explicit ``--rebuild-legacy`` / ``legacy`` run.
+    on an explicit ``--rebuild-legacy`` / ``legacy`` run. It lives *inside* the
+    ``martinez_stage_qa`` package itself (``[tool.setuptools.package-data]`` in
+    ``pyproject.toml``), so it comes with the install and is found the same
+    way regardless of the current working directory.
 
 ``session_data/``
     Ephemeral per-run sliced fetches (DWR repo, NOAA, harmonic, SF, MAL).
@@ -18,16 +21,25 @@ ephemeral ``session_data/``):
 ``output/``
     Final and review products. Defaults to ``./output`` but callers may point it
     at any location (an "assumed" vs. "indicated" output directory).
+
+``ROOT`` is the project/deployment directory (containing ``session_data/`` and
+``output/``): it defaults to the current working directory and can be
+overridden with the ``MARTINEZ_STAGE_ROOT`` environment variable.
 """
 from __future__ import annotations
 
 import os
 import shutil
+from importlib import resources
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(os.environ.get("MARTINEZ_STAGE_ROOT", Path.cwd())).resolve()
 
-DATA_DIR = ROOT / "data"
+# Bundled with the package (see [tool.setuptools.package-data]); overridable
+# via MARTINEZ_STAGE_DATA_DIR for pointing at a different copy during testing.
+_PACKAGE_DATA_DIR = Path(str(resources.files("martinez_stage_qa") / "data"))
+DATA_DIR = Path(os.environ.get("MARTINEZ_STAGE_DATA_DIR", _PACKAGE_DATA_DIR)).resolve()
+
 SESSION_DIR = ROOT / "session_data"
 DEFAULT_OUTPUT_DIR = ROOT / "output"
 

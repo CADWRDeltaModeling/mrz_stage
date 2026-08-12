@@ -1,0 +1,2 @@
+[console_scripts]
+update-martinez-stage = martinez_stage_qa.update_martinez_stage:update_martinez_stage

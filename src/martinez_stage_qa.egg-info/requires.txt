@@ -1,0 +1,7 @@
+click
+numpy
+pandas
+matplotlib
+pyyaml
+dms_datastore
+vtools

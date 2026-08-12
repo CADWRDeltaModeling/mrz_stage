@@ -8,7 +8,7 @@ from dms_datastore.read_multi import read_ts_repo
 from vtools.functions.unit_conversions import M2FT
 from vtools import days
 
-import paths
+from . import paths
 NAVD = 2.68
 NOAA_START = pd.Timestamp("2013-01-01")
 

@@ -20,11 +20,11 @@ from __future__ import annotations
 import click
 import pandas as pd
 
-import prepare_mrz_data
-import martinez_stage
-import transition_martinez_stage
-import mrz_legacy_fill
-import paths
+from . import prepare_mrz_data
+from . import martinez_stage
+from . import transition_martinez_stage
+from . import mrz_legacy_fill
+from . import paths
 
 LEGACY_START = pd.Timestamp("1990-01-01")
 
