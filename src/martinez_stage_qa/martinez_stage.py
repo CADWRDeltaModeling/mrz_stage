@@ -29,12 +29,16 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import logging
 
 from vtools.functions.filter import cosine_lanczos  # assume present; fail hard if missing
 from vtools.functions.neighbor_fill import fill_from_neighbor
 from vtools.data.gap import gap_count
 
 from . import paths
+from . import qa_checks
+
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------
@@ -383,9 +387,71 @@ def _window_ylim_masked(arrays, mask, margin: float = 0.05):
     return None
 
 
-def run(show: bool = True, output=None):
+def _plot_orig_data_gaps(
+    out,
+    gaps: pd.DataFrame,
+    *,
+    dwr_raw: pd.Series,
+    noaa: pd.Series,
+    harm: pd.Series,
+    offset: pd.Series,
+    corrected: pd.Series,
+    pad: pd.Timedelta = pd.Timedelta("10d"),
+):
+    """Save a focused raw-data plot around each corrected-series NaN span.
+
+    One figure per gap in ``gaps`` (the :func:`qa_checks.diagnose_corrected_nans`
+    frame), zoomed to ``[start - pad, end + pad]`` so a reviewer can see whether
+    the raw DWR (mrz) and NOAA (mrz2) inputs were actually present and why the
+    corrected series went NaN. Returns the list of written file paths.
+    """
+    written = []
+    for _, r in gaps.iterrows():
+        s, e = r["start"], r["end"]
+        a, b = s - pad, e + pad
+        fig, (axL, axO) = plt.subplots(
+            2, 1, figsize=(14, 7), sharex=True,
+            gridspec_kw={"height_ratios": [3, 1], "hspace": 0.12},
+        )
+        axL.plot(dwr_raw.loc[a:b].index, dwr_raw.loc[a:b].values,
+                 label="mrz DWR (raw)", linewidth=0.8)
+        axL.plot(noaa.loc[a:b].index, noaa.loc[a:b].values,
+                 label="mrz2 NOAA", linewidth=0.8, alpha=0.8)
+        axL.plot(harm.loc[a:b].index, harm.loc[a:b].values,
+                 label="harmonic", linewidth=0.6, alpha=0.6)
+        axL.plot(corrected.loc[a:b].index, corrected.loc[a:b].values,
+                 label="corrected (output)", linewidth=1.3, color="black")
+        axL.axvspan(s, e, color="red", alpha=0.12, label="NaN span")
+        axL.set_ylabel("Water level (ft)")
+        axL.set_title(
+            f"NaN inspection {s} -> {e}  ({r['n_missing']} samples)\n"
+            f"DWR {r['dwr_present']:.0%} / NOAA {r['noaa_present']:.0%} / "
+            f"offset {r['offset_present']:.0%} / masked {r['qa_masked']:.0%}  "
+            f"-> {r['cause']}"
+        )
+        axL.legend(loc="upper right", fontsize=8)
+        axL.grid(True, alpha=0.3)
+
+        axO.plot(offset.loc[a:b].index, offset.loc[a:b].values,
+                 label="offset_slow", color="C4", linewidth=1.0)
+        axO.axvspan(s, e, color="red", alpha=0.12)
+        axO.set_ylabel("offset (ft)")
+        axO.set_xlabel("Date")
+        axO.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        fname = out / f"martinez_naninspect_{s:%Y%m%d_%H%M}.png"
+        fig.savefig(fname, dpi=150)
+        plt.close(fig)
+        written.append(fname)
+        print(f"[nan-check] wrote raw-data inspection plot: {fname}")
+    return written
+
+
+def run(show: bool = True, output=None, plot_orig: bool = False):
     p = Params()
     out = paths.output_dir(output)
+
 
     # 1) Load series
     z_dwr = _read_series(DWR_FILE, "value")
@@ -575,6 +641,20 @@ def run(show: bool = True, output=None):
         # idx is a DateTimeIndex; slice assignment marks all timestamps in [s, e]
         combined_fill.loc[s:e] = True
 
+    # Record *which* QA step masked how much, so a reviewer can see why DWR was
+    # ruled out (not just that it was). offset undefined is logged too because a
+    # NaN offset drops present DWR without any flag firing.
+    n = len(idx)
+    logger.info(
+        "QA flag counts (samples): clock_shift=%d resid=%d d1_flat=%d "
+        "subtidal=%d gap_bad=%d -> combined=%d, fill-mask=%d/%d (%.2f%%); "
+        "offset undefined=%d",
+        int(lag_persist_full.sum()), int(resid_flag.sum()), int(d1_flat_flag.sum()),
+        int(subdiff_flag.sum()), int(gap_bad.sum()), int(combined.sum()),
+        int(combined_fill.sum()), n, 100.0 * combined_fill.mean(),
+        int(offset.isna().sum()),
+    )
+
     # 9b) Masked and neighbor-filled DWR series
     #
     # NOTE ON "ALIGNED" SPACE:
@@ -622,22 +702,91 @@ def run(show: bool = True, output=None):
     else:
         r2_fit = np.nan
         last_overlap = None
-    print(
-        "NOAA neighbor-fill regression (DWR_aligned ~ a + b*NOAA):\n"
-        f"  b (tidal amplification) = {b_fit:.4f}\n"
-        f"  a (intercept, ft)       = {a_fit:.4f}\n"
-        f"  R^2                     = {r2_fit:.5f}\n"
-        f"  sigma_resid (ft)        = {sigma_fit:.4f}\n"
-        f"  overlap points          = {n_over}\n"
-        f"  overlap through         = {last_overlap}"
+    logger.info(
+        "NOAA neighbor-fill regression (DWR_aligned ~ a + b*NOAA): "
+        "b=%.4f a=%.4f R^2=%.5f sigma_resid=%.4f overlap=%d through=%s",
+        b_fit, a_fit, r2_fit, sigma_fit, n_over, last_overlap,
     )
     if np.isfinite(r2_fit) and (r2_fit < 0.95 or abs(b_fit - 1.0) > 0.05):
-        print("  [check] regression looks off (R^2 low or b far from ~1.01) "
-              "-- inspect DWR/NOAA agreement before trusting the fill.")
+        logger.warning(
+            "[check] neighbor-fill regression looks off (R^2=%.4f, b=%.4f); "
+            "inspect DWR/NOAA agreement before trusting the fill.",
+            r2_fit, b_fit,
+        )
 
     # Return to the DWR frame by re-applying the slow relative drift term
     dwr_corrected = dwr_aligned_filled + offset
 
+    # 9b-bis) Datum-offset dropout pass-through (surgical, not a global fill).
+    #
+    # When NOAA (mrz2) has a multi-week outage the 45-day rolling `offset` goes
+    # undefined in the interior of the hole, turning dwr_corrected into NaN even
+    # though DWR is present and unmasked. There the offset cancels exactly:
+    #   (z_dwr_u - offset) + offset == z_dwr_u,
+    # so the correct value is simply the (noise-filtered) DWR series.
+    #
+    # Restore ONLY those points -- present DWR (already interpolated up to
+    # interp_limit_filter=4 steps) and not QA-masked -- instead of globally
+    # back-filling `offset`. Deliberately un-robust: if DWR is itself missing
+    # (beyond the small interp limit) or QA-masked during a NOAA outage, the
+    # point stays NaN and surfaces via the nan-check as a real error rather than
+    # being silently invented. See martinez_workflow.md sec 2.
+    passthrough_noaa_gap = offset.isna() & z_dwr_u.notna() & (~combined_fill)
+    n_pass = int(passthrough_noaa_gap.sum())
+    if n_pass:
+        dwr_corrected[passthrough_noaa_gap] = z_dwr_u[passthrough_noaa_gap]
+        logger.info(
+            "offset-dropout pass-through: restored %d sample(s) as raw DWR where "
+            "the datum offset was undefined (NOAA gap) but DWR was present and "
+            "unmasked; see 'passthrough_noaa_gap' in %s.",
+            n_pass, OUT_FLAGS,
+        )
+
+
+
+    # 9c) Gap check + attribution on the corrected series.
+    # This series feeds the final product; NaNs here propagate to the model
+    # input. Report any NaN spans and attribute each to a probable cause
+    # (undefined offset, NOAA neighbor gap, QA-masked DWR, ...) so a reviewer
+    # can see *why* DWR was dropped rather than just that it was.
+    corr_nans = qa_checks.diagnose_corrected_nans(
+        dwr_corrected,
+        dwr=z_dwr_u,
+        noaa=z_noaa_u,
+        offset=offset,
+        mask=combined_fill,
+    )
+    if corr_nans.empty:
+        logger.info(
+            "[nan-check] corrected MRZ series: OK -- no NaNs (%s -> %s).",
+            dwr_corrected.index.min(), dwr_corrected.index.max(),
+        )
+    else:
+        total_nan = int(dwr_corrected.isna().sum())
+        logger.warning(
+            "[nan-check] corrected MRZ series: %d NaN sample(s) in %d period(s) "
+            "(these propagate to the final product):",
+            total_nan, len(corr_nans),
+        )
+        for _, r in corr_nans.iterrows():
+            logger.warning(
+                "    %s -> %s  (%d samples, %s)  "
+                "DWR present %.0f%%, NOAA present %.0f%%, offset present %.0f%%, "
+                "QA-masked %.0f%%  ->  %s",
+                r["start"], r["end"], r["n_missing"], r["duration"],
+                100 * r["dwr_present"], 100 * r["noaa_present"],
+                100 * r["offset_present"], 100 * r["qa_masked"], r["cause"],
+            )
+        if plot_orig:
+            _plot_orig_data_gaps(
+                out,
+                corr_nans,
+                dwr_raw=z_dwr_u_raw,
+                noaa=z_noaa_u,
+                harm=z_harm_u,
+                offset=offset,
+                corrected=dwr_corrected,
+            )
 
 
     # Build intervals per reason
@@ -700,6 +849,7 @@ def run(show: bool = True, output=None):
             "gap_bad": gap_bad,
             "bad_dwr": combined,
             "bad_dwr_fill": combined_fill,  # expanded for filling
+            "passthrough_noaa_gap": passthrough_noaa_gap,  # DWR passed through where offset undefined
             "mrz_elev_masked": dwr_masked,
             "mrz_elev_corrected": dwr_corrected,
             # Canonical alias for downstream stitching:

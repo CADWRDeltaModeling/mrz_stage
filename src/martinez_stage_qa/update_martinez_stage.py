@@ -11,14 +11,19 @@ unless ``--rebuild-legacy`` is given.
 
 Examples
 --------
-    python update_martinez_stage.py run --end 2026-08-08
-    python update_martinez_stage.py run --end NOW
-    python update_martinez_stage.py legacy          # cold-start seed (rare)
+    update_martinez_stage run --end 2026-08-08
+    update_martinez_stage run --end NOW
+    update_martinez_stage legacy          # cold-start seed (rare)
 """
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import click
 import pandas as pd
+
+from dms_datastore.logging_config import configure_logging, resolve_loglevel
 
 from . import prepare_mrz_data
 from . import martinez_stage
@@ -26,7 +31,48 @@ from . import transition_martinez_stage
 from . import mrz_legacy_fill
 from . import paths
 
-LEGACY_START = pd.Timestamp("1990-01-01")
+LEGACY_START = pd.Timestamp("1991-02-01")
+
+logger = logging.getLogger(__name__)
+
+
+def _logging_options(f):
+    """Attach the standard --logdir/--loglevel/--debug/--quiet options.
+
+    Mirrors the dms_datastore CLI logging convention.
+    """
+    f = click.option(
+        "--logdir", type=click.Path(file_okay=False, path_type=Path),
+        default="logs", show_default=True,
+        help="Directory for timestamped run logfiles.",
+    )(f)
+    f = click.option(
+        "--loglevel", default=None,
+        help="Explicit level (DEBUG/INFO/WARNING/...); overrides --debug/--quiet.",
+    )(f)
+    f = click.option(
+        "--debug", is_flag=True, default=False, help="Log at DEBUG level.",
+    )(f)
+    f = click.option(
+        "--quiet", is_flag=True, default=False,
+        help="Silence console logging (the file log is still written).",
+    )(f)
+    return f
+
+
+def _configure_logging(logdir, debug, quiet, loglevel, *, prefix):
+    """Resolve flags and configure the martinez_stage_qa logger tree."""
+    level, console = resolve_loglevel(debug=debug, quiet=quiet, loglevel=loglevel)
+    logpath = configure_logging(
+        package_name="martinez_stage_qa",
+        level=level,
+        console=console,
+        logdir=logdir,
+        logfile_prefix=prefix,
+    )
+    if logpath is not None:
+        logger.info("logging to %s", logpath)
+    return logpath
 
 
 class TimestampParam(click.ParamType):
@@ -96,56 +142,69 @@ def update_martinez_stage():
 
 
 @update_martinez_stage.command()
-@click.option("--start", type=START, default=None, help="Start date (default 1990-01-01).")
+@click.option("--start", type=START, default=None, help="Start date (default 1991-02-01).")
 @click.option("--end", type=END, default="NOW", show_default=True,
               help="End cutoff: an ISO date or NOW.")
 @click.option("--rebuild-legacy", is_flag=True, default=False,
               help="Also regenerate the frozen pre-NOAA legacy fill (needed on a cold start).")
 @click.option("--output", type=click.Path(file_okay=False), default=None,
               help="Output directory for products (default ./output).")
+@click.option("--plot-orig-data", is_flag=True, default=False,
+              help="Save a raw-data (mrz/NOAA) inspection plot around each corrected-series NaN span.")
 @_freshness_options
-def run(start, end, rebuild_legacy, output, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac):
+@_logging_options
+def run(start, end, rebuild_legacy, output, plot_orig_data, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac, logdir, loglevel, debug, quiet):
     """Run the full pipeline: prepare -> qaqc -> transition."""
+    _configure_logging(logdir, debug, quiet, loglevel, prefix="update_run")
+    logger.info("pipeline start: end=%s rebuild_legacy=%s output=%s", end, rebuild_legacy, output)
     click.echo(f"[1/3] prepare  (end={end:%Y-%m-%d %H:%M})")
     _run_prepare(start, end, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac)
     if rebuild_legacy:
         click.echo("[*]   legacy fill (frozen pre-NOAA)")
         mrz_legacy_fill.fill_mrz_legacy(start=LEGACY_START, end=mrz_legacy_fill.NOAA_START, show=False)
     click.echo("[2/3] qaqc")
-    martinez_stage.run(show=False, output=output)
+    martinez_stage.run(show=False, output=output, plot_orig=plot_orig_data)
     click.echo("[3/3] transition")
     transition_martinez_stage.transition(show=False, output=output)
     click.echo(f"done -> {paths.output_dir(output) / paths.FINAL}")
 
 
 @update_martinez_stage.command()
-@click.option("--start", type=START, default=None, help="Start date (default 1990-01-01).")
+@click.option("--start", type=START, default=None, help="Start date (default 1991-02-01).")
 @click.option("--end", type=END, default="NOW", show_default=True,
               help="End cutoff: an ISO date or NOW.")
 @_freshness_options
-def prepare(start, end, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac):
+@_logging_options
+def prepare(start, end, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac, logdir, loglevel, debug, quiet):
     """Fetch sources and write the canonical 15-min CSVs (with freshness guard)."""
+    _configure_logging(logdir, debug, quiet, loglevel, prefix="prepare")
     _run_prepare(start, end, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac)
 
 
 @update_martinez_stage.command()
 @click.option("--output", type=click.Path(file_okay=False), default=None,
               help="Output directory for products (default ./output).")
-def qaqc(output):
+@click.option("--plot-orig-data", is_flag=True, default=False,
+              help="Save a raw-data (mrz/NOAA) inspection plot around each corrected-series NaN span.")
+@_logging_options
+def qaqc(output, plot_orig_data, logdir, loglevel, debug, quiet):
     """Run post-NOAA QA/QC + correction (auto-derives its own time window)."""
-    martinez_stage.run(show=False, output=output)
+    _configure_logging(logdir, debug, quiet, loglevel, prefix="qaqc")
+    martinez_stage.run(show=False, output=output, plot_orig=plot_orig_data)
 
 
 @update_martinez_stage.command()
 @click.option("--output", type=click.Path(file_okay=False), default=None,
               help="Output directory for products (default ./output).")
-def transition(output):
+@_logging_options
+def transition(output, logdir, loglevel, debug, quiet):
     """Blend the legacy and corrected series into the final product."""
+    _configure_logging(logdir, debug, quiet, loglevel, prefix="transition")
     transition_martinez_stage.transition(show=False, output=output)
 
 
 @update_martinez_stage.command()
-@click.option("--start", type=START, default=None, help="Start date (default 1990-01-01).")
+@click.option("--start", type=START, default=None, help="Start date (default 1991-02-01).")
 @click.option("--end", type=END, default=None,
               help="Legacy end (defaults to the frozen NOAA_START).")
 def legacy(start, end):

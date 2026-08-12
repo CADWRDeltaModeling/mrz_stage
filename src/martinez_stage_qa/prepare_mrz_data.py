@@ -122,8 +122,10 @@ def prepare(
     Critical feeds (DWR repo, NOAA) hard-fail when staler than their tolerance;
     neighbor feeds (SF, MAL) only warn.
     """
-    start = pd.Timestamp("1990-01-01") if start is None else pd.Timestamp(start)
-    end = pd.Timestamp("2026-01-02") if end is None else pd.Timestamp(end)
+    start = pd.Timestamp("1990-02-01") if start is None else pd.Timestamp(start)
+    if end is None:
+        raise ValueError("end must be specified (an ISO date or NOW)")
+    end = pd.Timestamp(end)
     to_navd = pd.Timestamp(2006, 1, 1)
 
     # Spawn (or clear) the ephemeral session-data directory for this run.

@@ -26,15 +26,25 @@ residual-energy checks. The full reference-role map and a review checklist are i
 
 ## 0. What to run (operator quick start)
 
-The single entry point is **`update_martinez_stage.py`** — a Click CLI that
-orchestrates `prepare → qaqc → transition` in-process, threading one `--end`
-(an ISO date or `NOW`) through the whole pipeline. Use it first, then use the
+This project is now an installable package (`martinez-stage-qa`, src-layout under
+`src/martinez_stage_qa/`). Install it once (editable for development)—this also pulls
+in the dependencies and wires up the console command:
+
+```bash
+pip install -e .
+```
+
+The single entry point is the **`update_martinez_stage`** console command
+(defined by `[project.scripts]` in `pyproject.toml`, backed by
+`martinez_stage_qa.update_martinez_stage`) — a Click CLI that orchestrates
+`prepare → qaqc → transition` in-process, threading one `--end` (an ISO date or
+`NOW`) through the whole pipeline. Use it first, then use the
 [Reviewer's guide](#8-reviewers-guide) to assess quality.
 
 ### 0.1 Update run (normal operation; advances post-2013 to "now")
 
 ```bash
-python update_martinez_stage.py run --end NOW
+update_martinez_stage run --end NOW
 ```
 
 - `--end` accepts `NOW` or an ISO date (e.g. `--end 2026-08-08`); default is `NOW`.
@@ -55,13 +65,13 @@ Use this only when bootstrapping from scratch or intentionally regenerating the
 frozen legacy pre-2014 segment (`mrz_stage_filled_legacy.csv`):
 
 ```bash
-python update_martinez_stage.py run --end NOW --rebuild-legacy
+update_martinez_stage run --end NOW --rebuild-legacy
 ```
 
 To regenerate only the legacy seed (rare):
 
 ```bash
-python update_martinez_stage.py legacy
+update_martinez_stage legacy
 ```
 
 ### 0.3 Individual stages (advanced / debugging)
@@ -69,9 +79,9 @@ python update_martinez_stage.py legacy
 The orchestrator also exposes each stage as its own subcommand:
 
 ```bash
-python update_martinez_stage.py prepare --end NOW
-python update_martinez_stage.py qaqc
-python update_martinez_stage.py transition
+update_martinez_stage prepare --end NOW
+update_martinez_stage qaqc
+update_martinez_stage transition
 ```
 
 These are equivalent to invoking the underlying scripts directly
@@ -152,6 +162,17 @@ always tell which gaps were holes vs. which were deliberately cut.
 > Tunable breadth: the 45 d / 10 d pair is the single most important "how long is long-term"
 > choice. Narrower windows track drift more aggressively (and risk absorbing real signal);
 > wider windows are more conservative.
+
+> **Limitation — NOAA-outage offset dropout.** Because $\delta$ is a 45-day rolling median of
+> the DWR−NOAA subtidal difference, a NOAA (mrz2) outage longer than that window leaves
+> $\delta$ undefined in the interior of the hole. Since the product is
+> $z^{\text{corr}} = (z_{\text{DWR}} - \delta) + \delta$, an undefined $\delta$ would drop
+> *present* DWR. Where DWR is present (within the 4-step interpolation limit) and unmasked,
+> $\delta$ cancels and the code passes the DWR series through unchanged, recorded in the
+> `passthrough_noaa_gap` column of `martinez_flags.csv`. This is intentionally narrow: if DWR
+> is **also** missing (beyond the 4-step limit) or QA-masked during a NOAA outage, the point is
+> left NaN and fails the final nan-check — a real gap we want to surface, not invent. In short,
+> the product tolerates NOAA missing, but **not** NOAA and DWR missing at once.
 
 ### 2.1 What the neighbor fill does in each frequency band
 
@@ -248,6 +269,27 @@ flowchart LR
   present does not change it. Inputs: `dms_mrz_cleaned_1990_2017.csv`, harmonic, SF, MAL,
   and `dfm_trimbur_rw_mrz_sfsub.yaml`.
 
+> **Gotcha — the product's start date lives in the frozen file, not in `--start`.**
+> `transition` (and therefore the final `dms_mrz_elev_filled.csv`) reads the legacy
+> segment *directly from the on-disk `data/mrz_stage_filled_legacy.csv`*. The
+> `--start` option and the `LEGACY_START` constant in `update_martinez_stage.py` only
+> feed the **regeneration** paths (`legacy` and `run --rebuild-legacy`). A normal
+> `prepare`/`run` treats the legacy fill as frozen and never rewrites it, so editing
+> `LEGACY_START` (or passing `--start`) has **no effect** on the final series until you
+> actually regenerate the frozen file. If the final nan-check reports a leading gap
+> (e.g. `1990-01-01 → 1991-01-26`), it is coming from the frozen CSV's leading NaNs, not
+> from the current run. To move the product's start, regenerate the legacy fill:
+>
+> ```bash
+> update_martinez_stage legacy            # rebuild just the frozen seed
+> # or: update_martinez_stage run --end NOW --rebuild-legacy
+> ```
+>
+> Note also that the `if __name__ == "__main__"` block at the bottom of
+> `mrz_legacy_fill.py` hardcodes its own `start` (`1990-02-01`), which differs from
+> `LEGACY_START` (`1991-02-01`). Regenerate via the `legacy` CLI command (which honors
+> `LEGACY_START`), not by running the module directly, or the two will disagree.
+
 ### ② Current workflow — re-run to advance to the current year
 
 Driven by the **`update_martinez_stage.py`** orchestrator
@@ -274,8 +316,12 @@ Use this as the retention policy when cleaning the workspace.
   never cleared automatically: the harmonic source (`mrzastro_1920_2035.csv`), the
   hand-cleaned legacy record (`dms_mrz_cleaned_1990_2017.csv`), the DFM parameters
   (`dfm_trimbur_rw_mrz_sfsub.yaml`), and the frozen pre-2014 legacy fill
-  (`mrz_stage_filled_legacy.csv`). The legacy fill is only rewritten on an explicit
-  `--rebuild-legacy` / `legacy` run.
+  (`mrz_stage_filled_legacy.csv`). This tier is **bundled inside the installed
+  package** at `src/martinez_stage_qa/data/` (declared via
+  `[tool.setuptools.package-data]` in `pyproject.toml` and resolved through
+  `importlib.resources` in `paths.py`), so it ships with the install and is found
+  regardless of the current working directory. The legacy fill is only rewritten on
+  an explicit `--rebuild-legacy` / `legacy` run.
 - **`session_data/` — ephemeral per-run fetches.** The sliced source series that
   `prepare` fetches from the repo each run: `mrz_dwr_repo.csv`, `mrz_harmonic.csv`,
   `mrz_noaa_martinez.csv`, `sf_stage.csv`, `mal_stage.csv`. The whole directory is
@@ -287,8 +333,9 @@ Use this as the retention policy when cleaning the workspace.
   `martinez_qaqc.png`, `martinez_qaqc_zoom.png`, `transition_martinez.png`).
 
 Keep (required inputs, generated intermediates, and final products):
-- Scripts: `update_martinez_stage.py`, `prepare_mrz_data.py`, `martinez_stage.py`,
-  `transition_martinez_stage.py`, `mrz_legacy_fill.py`, `paths.py`
+- Package modules (under `src/martinez_stage_qa/`): `update_martinez_stage.py`,
+  `prepare_mrz_data.py`, `martinez_stage.py`, `transition_martinez_stage.py`,
+  `mrz_legacy_fill.py`, `paths.py`
 - Everything under `data/`, plus the products written to `output/`.
 - `session_data/` is regenerated by `prepare`; its contents are disposable but the
   directory itself is expected.

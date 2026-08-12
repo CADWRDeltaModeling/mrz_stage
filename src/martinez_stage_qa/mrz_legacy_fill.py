@@ -160,6 +160,6 @@ def fill_mrz_legacy(
 
 
 if __name__ == "__main__":
-    fill_mrz_legacy(start = pd.Timestamp("1990-01-01"),
+    fill_mrz_legacy(start = pd.Timestamp("1990-02-01"),
                     end = NOAA_START,
                     dfm_yaml="dfm_trimbur_rw_mrz_sfsub.yaml")

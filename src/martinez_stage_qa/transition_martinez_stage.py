@@ -15,11 +15,16 @@ Outputs:
   - transition_martinez.png: Visualization of the transition
 """
 
+import logging
+
 import pandas as pd
 import matplotlib.pyplot as plt
 from vtools.functions.transition import transition_ts
 
 from . import paths
+from . import qa_checks
+
+logger = logging.getLogger(__name__)
 
 # Transition window
 TRANSITION_START = "2013-12-20"
@@ -48,6 +53,9 @@ def transition(show: bool = True, output=None):
     )["mrz_elev_corrected"]
     martinez_corrected = martinez_corrected.resample('15min').asfreq()
 
+    logger.info("MRZ filled (pre-NOAA): %s to %s", mrz_filled.index.min(), mrz_filled.index.max())
+    logger.info("Martinez corrected (post-NOAA): %s to %s",
+                martinez_corrected.index.min(), martinez_corrected.index.max())
     print(f"MRZ filled (pre-NOAA): {mrz_filled.index.min()} to {mrz_filled.index.max()}")
     print(f"Martinez filled (post-NOAA): {martinez_corrected.index.min()} to {martinez_corrected.index.max()}")
     print(f"Names: {mrz_filled.name}, {martinez_corrected.name}")
@@ -71,6 +79,8 @@ def transition(show: bool = True, output=None):
     
     # Save output
     final_series.to_csv(out / paths.FINAL, header=True, float_format="%.3f")
+    logger.info("saved final series to %s (%s -> %s)",
+                out / paths.FINAL, final_series.index.min(), final_series.index.max())
     print(f"\nSaved final series to {out / paths.FINAL}")
     print(f"Final series: {final_series.index.min()} to {final_series.index.max()}")
     
@@ -122,6 +132,15 @@ def transition(show: bool = True, output=None):
     print(f"Saved plot to {out / paths.TRANSITION_PLOT}")
     if show:
         plt.show()
+
+    # Final-product gap check. The delivered series is the model input and must
+    # be gap-free; fail loudly (after products + plot are written, so the
+    # artifacts remain available for tracing) if any NaNs slipped through.
+    qa_checks.report_nan_intervals(
+        final_series,
+        f"final product ({paths.FINAL})",
+        raise_on_nan=True,
+    )
 
 
 
