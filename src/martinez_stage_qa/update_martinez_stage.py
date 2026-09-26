@@ -142,7 +142,11 @@ def update_martinez_stage():
 
 
 @update_martinez_stage.command()
-@click.option("--start", type=START, default=None, help="Start date (default 1991-02-01).")
+@click.option("--start", type=START, default=None,
+              help="Only write the product from this date onward (default: full 1991-02-01 history). "
+                   "prepare/qaqc/transition always run over full history internally regardless of this "
+                   "value -- it only slices what gets written, so it can never reintroduce an edge effect "
+                   "at the slice boundary or bias the fixed legacy/NOAA splice.")
 @click.option("--end", type=END, default="NOW", show_default=True,
               help="End cutoff: an ISO date or NOW.")
 @click.option("--rebuild-legacy", is_flag=True, default=False,
@@ -157,16 +161,19 @@ def update_martinez_stage():
 def run(start, end, rebuild_legacy, output, plot_orig_data, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac, logdir, loglevel, debug, quiet):
     """Run the full pipeline: prepare -> qaqc -> transition."""
     _configure_logging(logdir, debug, quiet, loglevel, prefix="update_run")
-    logger.info("pipeline start: end=%s rebuild_legacy=%s output=%s", end, rebuild_legacy, output)
+    logger.info("pipeline start: end=%s rebuild_legacy=%s output=%s publish_start=%s",
+                end, rebuild_legacy, output, start)
     click.echo(f"[1/3] prepare  (end={end:%Y-%m-%d %H:%M})")
-    _run_prepare(start, end, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac)
+    # Always fetch/process full history -- `start` only slices the published
+    # product below, never the computation (see `transition`'s publish_start).
+    _run_prepare(None, end, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac)
     if rebuild_legacy:
         click.echo("[*]   legacy fill (frozen pre-NOAA)")
         mrz_legacy_fill.fill_mrz_legacy(start=LEGACY_START, end=mrz_legacy_fill.NOAA_START, show=False)
     click.echo("[2/3] qaqc")
     martinez_stage.run(show=False, output=output, plot_orig=plot_orig_data)
     click.echo("[3/3] transition")
-    transition_martinez_stage.transition(show=False, output=output)
+    transition_martinez_stage.transition(show=False, output=output, publish_start=start)
     click.echo(f"done -> {paths.output_dir(output) / paths.FINAL}")
 
 
@@ -196,13 +203,16 @@ def qaqc(output, plot_orig_data, logdir, loglevel, debug, quiet):
 
 
 @update_martinez_stage.command()
+@click.option("--start", type=START, default=None,
+              help="Only write the product from this date onward (default: full 1991-02-01 history). "
+                   "The blend itself always runs over full history; this only slices the write.")
 @click.option("--output", type=click.Path(file_okay=False), default=None,
               help="Output directory for products (default ./output).")
 @_logging_options
-def transition(output, logdir, loglevel, debug, quiet):
+def transition(start, output, logdir, loglevel, debug, quiet):
     """Blend the legacy and corrected series into the final product."""
     _configure_logging(logdir, debug, quiet, loglevel, prefix="transition")
-    transition_martinez_stage.transition(show=False, output=output)
+    transition_martinez_stage.transition(show=False, output=output, publish_start=start)
 
 
 @update_martinez_stage.command()

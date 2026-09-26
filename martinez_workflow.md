@@ -340,6 +340,48 @@ flowchart LR
 > `LEGACY_START` (`1991-02-01`). Regenerate via the `legacy` CLI command (which honors
 > `LEGACY_START`), not by running the module directly, or the two will disagree.
 
+> **Gotcha — `run --start` is a *publish-time slice*, not a computation bound.**
+> `update_martinez_stage run --start ...` always runs `prepare`/`qaqc`/`transition` over
+> **full history internally** regardless of `--start` — that flag only trims what gets
+> *written* to `paths.FINAL`, applied as the very last step in `transition_martinez_stage.py`
+> after the blend, plot, and gap-check all use the full (unsliced) series. This is
+> deliberate: `martinez_stage.estimate_slow_offset` estimates the slow DWR/NOAA datum
+> offset with **centered** rolling windows (`offset_win=45d`, then `offset_smooth_win=10d`
+> on top), and `transition` blends the frozen legacy segment against the corrected segment
+> over a **fixed** window, `2013-12-20 → 2014-01-01` (`TRANSITION_START`/`TRANSITION_END`
+> in `transition_martinez_stage.py`; [§2.2](#22-backup-reconstruction-when-noaa-also-fails)
+> covers backup-filling). If either of those computations only saw data starting near
+> `--start`, that start would become a new, artificially one-sided edge — moving the
+> precarious border around rather than removing it. Always computing full history and
+> slicing only the write sidesteps that entirely: no `--start` value for `run` can ever
+> bias the splice or trip an edge effect, and a scheduled job can safely use a small,
+> fixed `--start` (e.g. `2020-01-01`) purely to keep its staged/published artifact small,
+> with no risk to correctness.
+>
+> This guarantee is specific to the **chained `run` command**. The standalone `prepare`/
+> `qaqc` subcommands are unaffected and still use `--start`/`--end` to bound what they
+> actually fetch/compute (useful for a fast ad hoc partial refresh) — so if you manually
+> chain `prepare --start <recent-date>` → `qaqc` → the standalone `transition` subcommand,
+> `martinez_flags.csv` genuinely only covers that bounded window, and the margin guard in
+> `transition()` applies: it requires the corrected series to start at least
+> `45d + 10d = 55d` before `2013-12-20` (i.e. `<= 2013-10-26`), raising an explicit
+> `ValueError` naming the required date if it doesn't. That guard is derived from
+> `martinez_stage.Params` at import time, so it stays correct if `offset_win`/
+> `offset_smooth_win` are ever retuned.
+>
+> Because a scheduled `run --start <cutoff>` writes only `[cutoff, now)`, its staged
+> output never overlaps anything before `cutoff` — so the dropbox reconcile policy
+> (`prefer: staged` vs `prefer: repo`) is moot for everything before `cutoff`; only the
+> small post-`cutoff` tail is ever reconciled, repeatedly, and `prefer: staged` there is
+> fine since a full-history run stays internally self-consistent end to end. Moving
+> `cutoff` forward later (e.g. `2020-01-01` → `2025-01-01`), or the first run after a
+> reliability fix like this one, calls for a one-off *coherence sweep* instead: run
+> `update_martinez_stage run` with `--start` omitted (writes the full, unsliced product),
+> then reconcile that single file manually with a temporary `prefer: repo` override in
+> the recipe (so the sweep can only fill gaps in already-published history, never
+> overwrite it, until it's been validated) before reverting the recipe to `prefer: staged`
+> for routine runs.
+
 ### ② Current workflow — re-run to advance to the current year
 
 Driven by the **`update_martinez_stage.py`** orchestrator

@@ -23,6 +23,7 @@ from vtools.functions.transition import transition_ts
 
 from . import paths
 from . import qa_checks
+from .martinez_stage import Params
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,30 @@ logger = logging.getLogger(__name__)
 TRANSITION_START = "2013-12-20"
 TRANSITION_END = "2014-01-01"
 
+# martinez_stage.estimate_slow_offset uses centered rolling windows
+# (offset_win, then offset_smooth_win on top) to estimate the slow DWR/NOAA
+# datum offset. A corrected series that starts too close to TRANSITION_START
+# gives that estimate an asymmetric (mostly one-sided) window right where the
+# legacy/NOAA splice happens, biasing it away from what a full-history run
+# would produce there -- i.e. reaching the window is not enough on its own,
+# the offset estimate also needs to be "warmed up" before it.
+_p = Params()
+_REQUIRED_MARGIN = pd.Timedelta(_p.offset_win) + pd.Timedelta(_p.offset_smooth_win)
 
-def transition(show: bool = True, output=None):
+
+def transition(show: bool = True, output=None, publish_start=None):
+    """Blend the legacy and corrected series, write the final product.
+
+    Parameters
+    ----------
+    publish_start : str or pandas.Timestamp, optional
+        If given, the *written* product is sliced to ``>= publish_start``.
+        This never affects the blend computation itself (always full history,
+        so the centered rolling windows in `martinez_stage` stay warmed up) --
+        it only trims what gets written to `paths.FINAL`, so the staged output
+        for a given run can be a small, single, internally-consistent tail
+        slice without reintroducing an edge effect at the slice boundary.
+    """
     out = paths.output_dir(output)
 
     # Read the frozen legacy fill (pre-NOAA) from data/
@@ -52,6 +75,23 @@ def transition(show: bool = True, output=None):
         comment="#"
     )["mrz_elev_corrected"]
     martinez_corrected = martinez_corrected.resample('15min').asfreq()
+
+    required_start = pd.Timestamp(TRANSITION_START) - _REQUIRED_MARGIN
+    if martinez_corrected.index.min() > required_start:
+        raise ValueError(
+            f"transition needs the corrected series ({out / paths.FLAGS}, column "
+            f"'mrz_elev_corrected') to reach back to at least {required_start.date()} "
+            f"-- {_REQUIRED_MARGIN} before the fixed {TRANSITION_START} legacy/NOAA "
+            f"splice window, so martinez_stage's centered rolling offset estimate "
+            f"(offset_win={_p.offset_win} + offset_smooth_win={_p.offset_smooth_win}) "
+            f"is warmed up by the time it reaches the splice, not lopsided by an "
+            f"artificially short history. It only starts at "
+            f"{martinez_corrected.index.min()}. This happens when `qaqc`/`run` was "
+            f"given `--start` too close to (or after) {TRANSITION_START} -- that flag "
+            f"bounds how far back qaqc reprocesses. Re-run `qaqc` (or `run`) with "
+            f"`--start` <= {required_start.date()}, or omit `--start` to use the "
+            f"full-history default, before calling `transition`."
+        )
 
     logger.info("MRZ filled (pre-NOAA): %s to %s", mrz_filled.index.min(), mrz_filled.index.max())
     logger.info("Martinez corrected (post-NOAA): %s to %s",
@@ -76,13 +116,20 @@ def transition(show: bool = True, output=None):
     
     final_series.name = "value"
     final_series.index.name = "datetime"
-    
+
+    # publish_start only trims the written artifact; plots/checks below still
+    # use the full final_series for complete splice-window context.
+    series_to_write = (
+        final_series if publish_start is None
+        else final_series.loc[pd.Timestamp(publish_start):]
+    )
+
     # Save output
-    final_series.to_csv(out / paths.FINAL, header=True, float_format="%.3f")
+    series_to_write.to_csv(out / paths.FINAL, header=True, float_format="%.3f")
     logger.info("saved final series to %s (%s -> %s)",
-                out / paths.FINAL, final_series.index.min(), final_series.index.max())
+                out / paths.FINAL, series_to_write.index.min(), series_to_write.index.max())
     print(f"\nSaved final series to {out / paths.FINAL}")
-    print(f"Final series: {final_series.index.min()} to {final_series.index.max()}")
+    print(f"Final series: {series_to_write.index.min()} to {series_to_write.index.max()}")
     
     # Create visualization
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
@@ -137,7 +184,7 @@ def transition(show: bool = True, output=None):
     # be gap-free; fail loudly (after products + plot are written, so the
     # artifacts remain available for tracing) if any NaNs slipped through.
     qa_checks.report_nan_intervals(
-        final_series,
+        series_to_write,
         f"final product ({paths.FINAL})",
         raise_on_nan=True,
     )
