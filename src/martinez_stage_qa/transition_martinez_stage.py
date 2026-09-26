@@ -16,6 +16,7 @@ Outputs:
 """
 
 import logging
+import os
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -124,11 +125,15 @@ def transition(show: bool = True, output=None, publish_start=None):
         else final_series.loc[pd.Timestamp(publish_start):]
     )
 
-    # Save output
-    series_to_write.to_csv(out / paths.FINAL, header=True, float_format="%.3f")
+    # Save output. Write to a same-directory temp file and rename into place so a
+    # concurrent reader (e.g. a dropbox reconcile job) can never see a partial file.
+    final_path = out / paths.FINAL
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    series_to_write.to_csv(tmp_path, header=True, float_format="%.3f")
+    os.replace(tmp_path, final_path)
     logger.info("saved final series to %s (%s -> %s)",
-                out / paths.FINAL, series_to_write.index.min(), series_to_write.index.max())
-    print(f"\nSaved final series to {out / paths.FINAL}")
+                final_path, series_to_write.index.min(), series_to_write.index.max())
+    print(f"\nSaved final series to {final_path}")
     print(f"Final series: {series_to_write.index.min()} to {series_to_write.index.max()}")
     
     # Create visualization
