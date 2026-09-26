@@ -15,7 +15,7 @@ dependencies = [
     "matplotlib",
     "pyyaml",
     "dms_datastore",
-    "vtools",
+    "vtools3",
 ]
 
 [project.scripts]

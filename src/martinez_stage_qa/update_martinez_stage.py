@@ -23,7 +23,7 @@ from pathlib import Path
 import click
 import pandas as pd
 
-from dms_datastore.logging_config import configure_logging, resolve_loglevel
+from .logging_config import configure_logging, resolve_loglevel
 
 from . import prepare_mrz_data
 from . import martinez_stage
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 def _logging_options(f):
     """Attach the standard --logdir/--loglevel/--debug/--quiet options.
 
-    Mirrors the dms_datastore CLI logging convention.
+    Mirrors the dms_datastore CLI logging convention (see local logging_config.py).
     """
     f = click.option(
         "--logdir", type=click.Path(file_okay=False, path_type=Path),
@@ -150,7 +150,8 @@ def update_martinez_stage():
 @click.option("--output", type=click.Path(file_okay=False), default=None,
               help="Output directory for products (default ./output).")
 @click.option("--plot-orig-data", is_flag=True, default=False,
-              help="Save a raw-data (mrz/NOAA) inspection plot around each corrected-series NaN span.")
+              help="Save a raw-data (mrz/NOAA) inspection plot around each corrected-series NaN span, "
+                   "plus a detail plot around each MAL/SF/harmonic backup-filled span.")
 @_freshness_options
 @_logging_options
 def run(start, end, rebuild_legacy, output, plot_orig_data, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing_nan_frac, logdir, loglevel, debug, quiet):
@@ -185,7 +186,8 @@ def prepare(start, end, dwr_tau_days, noaa_tau_days, neighbor_tau_days, trailing
 @click.option("--output", type=click.Path(file_okay=False), default=None,
               help="Output directory for products (default ./output).")
 @click.option("--plot-orig-data", is_flag=True, default=False,
-              help="Save a raw-data (mrz/NOAA) inspection plot around each corrected-series NaN span.")
+              help="Save a raw-data (mrz/NOAA) inspection plot around each corrected-series NaN span, "
+                   "plus a detail plot around each MAL/SF/harmonic backup-filled span.")
 @_logging_options
 def qaqc(output, plot_orig_data, logdir, loglevel, debug, quiet):
     """Run post-NOAA QA/QC + correction (auto-derives its own time window)."""

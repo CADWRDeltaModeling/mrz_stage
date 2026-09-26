@@ -35,6 +35,66 @@ def _read_value(fn: str) -> pd.Series:
     return s
 
 
+def neighbor_style_fill(
+    target: pd.Series,
+    *,
+    mal: pd.Series,
+    sf: pd.Series,
+    harm: pd.Series,
+    dfm_yaml: str,
+    subtidal_filter: str = "40h",
+) -> pd.Series:
+    """Reconstruct ``target`` from MAL/SF/harmonic neighbors.
+
+    This is the historical pre-NOAA Martinez fill technique used by
+    :func:`fill_mrz_legacy`, factored out so it can also serve as a backup
+    reconstruction wherever ``target``'s primary (NOAA-based) fill has
+    nothing to draw on -- e.g. a DWR gap that coincides with a NOAA (mrz2)
+    outage. See :func:`fill_mrz_legacy` for the two-band algorithm description.
+
+    Parameters
+    ----------
+    target : pandas.Series
+        Series to reconstruct (e.g. the DWR/Martinez record), gaps and all.
+    mal : pandas.Series
+        Mallard neighbor, same time base as ``target``.
+    sf : pandas.Series
+        San Francisco neighbor, same time base as ``target``.
+    harm : pandas.Series
+        Harmonic reconstruction, same time base as ``target``.
+    dfm_yaml : str
+        Path to the pre-fitted DFM parameters relating SF subtidal to
+        Martinez subtidal.
+    subtidal_filter : str, optional
+        cosine-Lanczos window spec, default ``"40h"``.
+
+    Returns
+    -------
+    pandas.Series
+        The reconstructed series, named ``"value"``.
+    """
+    target_sub = cosine_lanczos(target.interpolate(limit=4), subtidal_filter)
+    sf_sub = cosine_lanczos(sf.interpolate(limit=5), subtidal_filter)
+    mal_sub = cosine_lanczos(mal.interpolate(limit=4), subtidal_filter)
+
+    filled_sub = fill_from_neighbor(target=target_sub, neighbor=mal_sub, method="substitute")["filled"]
+
+    sfsub15 = sf_sub.resample("15min").interpolate(limit=4)
+    blob = load_dfm_params(dfm_yaml)
+    filled_sub = fill_from_neighbor(
+        target=filled_sub,
+        neighbor=sfsub15,
+        method="dfm_trimbur_rw",
+        params=blob,
+    )["filled"]
+
+    harm_res = harm - cosine_lanczos(harm, subtidal_filter)
+    target_res = target - filled_sub
+    filled_res = fill_from_neighbor(target=target_res, neighbor=harm_res, method="resid_interp_linear")["filled"]
+
+    return (filled_sub + filled_res).rename("value")
+
+
 def fill_mrz_legacy(
     *,
     dfm_yaml: str = str(paths.DFM_PARAMS),
@@ -110,6 +170,10 @@ def fill_mrz_legacy(
 
     See Also
     --------
+    neighbor_style_fill
+        The reusable two-band algorithm this function applies to the frozen
+        legacy record; also used as a backup reconstruction for post-NOAA
+        gaps in ``martinez_stage``.
     prepare_mrz_data
         Generates the canonical input series consumed by this function.
     martinez_stage
@@ -123,26 +187,9 @@ def fill_mrz_legacy(
     sf = _read_value(str(paths.SF)).loc[start:end]
     mal = _read_value(str(paths.MAL)).loc[start:end]
 
-    mrz_sub = cosine_lanczos(mrz_cleaned.interpolate(limit=4), "40h")
-    sf_sub = cosine_lanczos(sf.interpolate(limit=5), "40h")
-    mal_sub = cosine_lanczos(mal.interpolate(limit=4), "40h")
-
-    filled_mrz_sub = fill_from_neighbor(target=mrz_sub, neighbor=mal_sub, method="substitute")["filled"]
-
-    sfsub15 = sf_sub.resample("15min").interpolate(limit=4)
-    blob = load_dfm_params(dfm_yaml)
-    filled_mrz_sub = fill_from_neighbor(
-        target=filled_mrz_sub,
-        neighbor=sfsub15,
-        method="dfm_trimbur_rw",
-        params=blob,
-    )["filled"]
-
-    harm_res = mrz_ha - cosine_lanczos(mrz_ha, "40h")
-    mrz_res = mrz_cleaned - filled_mrz_sub
-    mrz_resful = fill_from_neighbor(target=mrz_res, neighbor=harm_res, method="resid_interp_linear")["filled"]
-
-    final = (filled_mrz_sub + mrz_resful).rename("value")
+    final = neighbor_style_fill(
+        mrz_cleaned, mal=mal, sf=sf, harm=mrz_ha, dfm_yaml=dfm_yaml,
+    )
     final.index.name = "datetime"
     paths.ensure_data()
     final.to_csv(paths.LEGACY_FILL, header=True, float_format="%.3f")

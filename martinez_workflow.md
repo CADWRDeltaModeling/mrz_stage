@@ -21,7 +21,7 @@ Three ideas make the rest easy to read:
 
 NOAA actually pulls **triple duty** — it fills gaps, stabilizes drift, *and* is the comparator
 for several of the QA "tripwires"; the harmonic is the tidal reference for the clock-shift and
-residual-energy checks. The full reference-role map and a review checklist are in the
+residual-energy checks. The full referenyce-role map and a review checklist are in the
 [Reviewer's guide](#8-reviewers-guide).
 
 ## 0. What to run (operator quick start)
@@ -32,6 +32,15 @@ in the dependencies and wires up the console command:
 
 ```bash
 pip install -e .
+```
+
+Data products (`output/*.csv`, `data/*.csv`, etc.) are tracked with **DVC** against an
+S3-compatible MinIO remote (see `.dvc/config`). `pip install -e .` does not install DVC
+itself — install it separately, including the S3 backend, then pull the tracked files:
+
+```bash
+conda install -c conda-forge dvc dvc-s3   # or: pip install "dvc[s3]"
+dvc pull
 ```
 
 The single entry point is the **`update_martinez_stage`** console command
@@ -58,6 +67,9 @@ Products updated by this run:
 - `dms_mrz_elev_filled.csv` (final 1990→present stitched product)
 - `martinez_flags.csv`, `martinez_intervals.csv`, `martinez_qaqc.png`,
   `martinez_qaqc_zoom.png`, `transition_martinez.png`
+- with `--plot-orig-data`: `martinez_naninspect_*.png` per remaining-NaN span and
+  `martinez_backupfill_*.png` per MAL/SF/harmonic backup-filled span
+  ([§2.2](#22-backup-reconstruction-when-noaa-also-fails))
 
 ### 0.2 Full rebuild (only when legacy needs regeneration)
 
@@ -169,10 +181,10 @@ always tell which gaps were holes vs. which were deliberately cut.
 > $z^{\text{corr}} = (z_{\text{DWR}} - \delta) + \delta$, an undefined $\delta$ would drop
 > *present* DWR. Where DWR is present (within the 4-step interpolation limit) and unmasked,
 > $\delta$ cancels and the code passes the DWR series through unchanged, recorded in the
-> `passthrough_noaa_gap` column of `martinez_flags.csv`. This is intentionally narrow: if DWR
-> is **also** missing (beyond the 4-step limit) or QA-masked during a NOAA outage, the point is
-> left NaN and fails the final nan-check — a real gap we want to surface, not invent. In short,
-> the product tolerates NOAA missing, but **not** NOAA and DWR missing at once.
+> `passthrough_noaa_gap` column of `martinez_flags.csv`. If DWR is **also** missing (beyond the
+> 4-step limit) or QA-masked during a NOAA outage, there is nothing left for the NOAA-based fill
+> to draw on; see [§2.2](#22-backup-reconstruction-when-noaa-also-fails) for how that case is
+> now handled.
 
 ### 2.1 What the neighbor fill does in each frequency band
 
@@ -212,6 +224,41 @@ how recent `--end` can be.
 > These regression stats ($a$, $b$, $R^2$, $\sigma_{\text{resid}}$, overlap count) are computed
 > inside `fill_from_neighbor` (returned in `model_info`) and **printed to the run log** by the
 > QA/QC step — see the [Reviewer's guide §8.5](#85-one-independent-check--read-it-from-the-run-log).
+
+### 2.2 Backup reconstruction when NOAA also fails
+
+The NOAA-based fill ([§2](#2-drift-free-aligned-frame)) needs *some* signal to fill from — a
+DWR/NOAA outage overlap (both unavailable over the same span) leaves it with nothing to draw
+on. This does happen: a ~6-week `mrz2` (NOAA) outage in 2014 overlapped an ~18-day DWR
+telemetry gap, and the corrected series would otherwise fail the final nan-check there.
+
+For exactly this case, `martinez_stage.run` falls back to the **same reconstruction technique**
+used for the frozen pre-2014 legacy fill ([§1](#1-high-level-pipeline), [§3](#3-the-trimbur--dynamic-factor-model-dfm-smoother)) —
+factored out as `neighbor_style_fill` in `mrz_legacy_fill.py` and reused by both paths:
+
+1. Subtidal fill by **MAL substitution** (San Joaquin at Mallard Island, the same-channel
+    upstream neighbor), then **DFM smoothing** against San Francisco
+    (`dfm_trimbur_rw_mrz_sfsub.yaml`, [§3](#3-the-trimbur--dynamic-factor-model-dfm-smoother)).
+2. Tidal-band residual filled by interpolating against the **harmonic** residual
+    (`resid_interp_linear`).
+
+This backup only runs when the NOAA-based `dwr_corrected` still has NaNs left after the normal
+fill and pass-through steps, and only over those remaining spans — it never overrides a good
+NOAA-based reconstruction. It is spliced in with vtools'
+[`ts_blend`](https://github.com/CADWRDeltaModeling/vtools3/blob/master/vtools/functions/blend.py)
+(`Params.backup_blend_win`, default `"1d"`), a priority-ordered blend that overlays the backup
+only where the NOAA-based series is missing, with a soft linear-weight taper over the blend
+window so there is no step at the edges (the same reason `ts_blend`, not `transition_ts`, was
+chosen here — it tolerates patching an arbitrary interior gap without a fully-specified
+NaN-free window on both sides).
+
+Samples rescued this way are recorded in the **`backup_filled`** column of
+`martinez_flags.csv`, and (with `--plot-orig-data`) a detail plot is written per contiguous
+span — `martinez_backupfill_<start>.png` — showing the raw DWR/NOAA inputs, the harmonic, the
+MAL/SF/harmonic reconstruction, and the final blended output side by side
+([§8](#8-reviewers-guide)). If a DWR+NOAA overlap gap is ever **not** covered by this backup
+(e.g. MAL/SF/harmonic are themselves unavailable there too), the point is left NaN and still
+fails the final nan-check — a real gap we want to surface, not invent.
 
 ## 3. The Trimbur / dynamic factor model (DFM) smoother
 
@@ -267,7 +314,10 @@ flowchart LR
 - **`mrz_legacy_fill.py`** produces `mrz_stage_filled_legacy.csv`, covering
   1990 → `NOAA_START = 2014-05-10`. Its domain is historical and fixed; advancing the
   present does not change it. Inputs: `dms_mrz_cleaned_1990_2017.csv`, harmonic, SF, MAL,
-  and `dfm_trimbur_rw_mrz_sfsub.yaml`.
+  and `dfm_trimbur_rw_mrz_sfsub.yaml`. Its core computation is factored out as
+  `neighbor_style_fill`, which `martinez_stage.py` also calls as the
+  [backup reconstruction](#22-backup-reconstruction-when-noaa-also-fails) for post-2013
+  DWR+NOAA overlap gaps.
 
 > **Gotcha — the product's start date lives in the frozen file, not in `--start`.**
 > `transition` (and therefore the final `dms_mrz_elev_filled.csv`) reads the legacy
@@ -441,7 +491,10 @@ flowchart TD
 For a practitioner reviewing a run. Open, in order: `martinez_qaqc.png` (overview),
 `martinez_qaqc_zoom.png` (last 21 days), `martinez_intervals.csv` (flagged spans + reasons),
 `martinez_flags.csv` (per-timestamp diagnostics), `transition_martinez.png` (the 2013→2014
-splice), and the products `dms_mrz_elev_2013_9999.csv` / `dms_mrz_elev_filled.csv`.
+splice), and the products `dms_mrz_elev_2013_9999.csv` / `dms_mrz_elev_filled.csv`. If the run
+used `--plot-orig-data`, also check any `martinez_backupfill_*.png`
+([§2.2](#22-backup-reconstruction-when-noaa-also-fails)) — these mark spans where DWR and NOAA
+were both unavailable and the product had to fall back to the MAL/SF/harmonic reconstruction.
 
 ### 8.1 Which reference feeds which step
 
@@ -457,7 +510,7 @@ tells you *what* a flag is really asserting.
 | Flat-derivative | **NOAA** tidal band | DWR too smooth / stuck vs. NOAA (dead or corner-cut sensor) |
 | Subtidal disagreement | **NOAA** subtidal | real low-frequency divergence (datum, biofouling) |
 | Gap count | none (intrinsic DWR) | coverage / how much fill is being relied on |
-| SF, MAL | **legacy path only** | pre-2014 neighbors; not used in modern QA |
+| SF, MAL | **legacy path**, plus modern **backup** ([§2.2](#22-backup-reconstruction-when-noaa-also-fails)) | pre-2014 neighbors; in the modern path, used only when DWR+NOAA overlap gaps leave the normal fill nothing to draw on |
 
 > Subtlety: the residual-IQR ratio is not a clean like-for-like — the DWR residual is measured
 > against the *harmonic* (`DWR − harmonic`) while the NOAA comparator uses *its own subtidal*
@@ -482,6 +535,11 @@ tells you *what* a flag is really asserting.
   `reason` column and confirm each is plausible against the raw trace.
 - **`gap_count` / `bad_dwr_fill`** — how much of the recent window is NOAA-filled vs. native
   DWR. Heavy recent fill → weight confidence accordingly.
+- **`backup_filled`** — samples rescued by the MAL/SF/harmonic backup
+  ([§2.2](#22-backup-reconstruction-when-noaa-also-fails)) because DWR and NOAA were both
+  unavailable. Should normally be all-zero/rare; a nonzero run means the NOAA-based fill had
+  nothing to draw on and the reconstruction is one step further from direct observation —
+  cross-check against the corresponding `martinez_backupfill_*.png`.
 - **Transition plot** — the blended line must be continuous across Dec 20 → Jan 1, no step.
 - **Product files** — index monotonic, regular 15-min, no unexpected NaNs; `value` equals
   `mrz_elev_corrected`.

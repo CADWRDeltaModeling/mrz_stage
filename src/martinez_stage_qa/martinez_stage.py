@@ -14,6 +14,9 @@ Outputs:
   - martinez_flags.csv: time-indexed diagnostics and combined bad mask (for DWR)
   - martinez_intervals.csv: merged "bad" intervals with reasons
   - martinez_qaqc.png: overview plots to review decisions
+  - martinez_naninspect_*.png / martinez_backupfill_*.png: per-span detail
+    plots (only with plot_orig=True), for remaining NaN spans and for spans
+    reconstructed by the MAL/SF/harmonic backup, respectively.
 
 Assumptions:
   - Index is a DatetimeIndex (monotonicity not checked).
@@ -33,10 +36,12 @@ import logging
 
 from vtools.functions.filter import cosine_lanczos  # assume present; fail hard if missing
 from vtools.functions.neighbor_fill import fill_from_neighbor
+from vtools.functions.blend import ts_blend
 from vtools.data.gap import gap_count
 
 from . import paths
 from . import qa_checks
+from .mrz_legacy_fill import neighbor_style_fill
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,8 @@ logger = logging.getLogger(__name__)
 DWR_FILE = str(paths.DWR_REPO)
 NOAA_FILE = str(paths.NOAA)
 HARM_FILE = str(paths.HARMONIC)
+SF_FILE = str(paths.SF)
+MAL_FILE = str(paths.MAL)
 
 OUT_FLAGS = paths.FLAGS
 OUT_INTERVALS = paths.INTERVALS
@@ -106,6 +113,9 @@ class Params:
     # interval building / expansion
     merge_gap: pd.Timedelta = pd.Timedelta("12h")   # merge flag gaps <= this
     expand: pd.Timedelta = pd.Timedelta("3h")      # expand each bad interval by this on each side
+
+    # backup reconstruction (MAL/SF/harmonic) blend width when NOAA can't fill
+    backup_blend_win: str = "1d"
 
     # recent-past zoom plot: days back from the series end
     zoom_days: int = 21
@@ -448,6 +458,58 @@ def _plot_orig_data_gaps(
     return written
 
 
+def _plot_backup_filled_gaps(
+    out,
+    backup_filled: pd.Series,
+    *,
+    merge_gap: pd.Timedelta,
+    dwr_raw: pd.Series,
+    noaa: pd.Series,
+    harm: pd.Series,
+    backup: pd.Series,
+    corrected: pd.Series,
+    pad: pd.Timedelta = pd.Timedelta("1d"),
+):
+    """Save a detail plot around each MAL/SF/harmonic backup-filled span.
+
+    One figure per contiguous ``backup_filled`` run, zoomed to
+    ``[start - pad, end + pad]`` so a reviewer can see the raw DWR/NOAA inputs
+    alongside the MAL/SF/harmonic reconstruction and the final blended output
+    where the NOAA-based fill had nothing to draw on. Returns the list of
+    written file paths.
+    """
+    written = []
+    for s, e in _merge_boolean_to_intervals(backup_filled, merge_gap):
+        a, b = s - pad, e + pad
+        fig, ax = plt.subplots(figsize=(14, 5))
+        ax.plot(dwr_raw.loc[a:b].index, dwr_raw.loc[a:b].values,
+                 label="mrz DWR (raw)", linewidth=0.8)
+        ax.plot(noaa.loc[a:b].index, noaa.loc[a:b].values,
+                 label="mrz2 NOAA", linewidth=0.8, alpha=0.8)
+        ax.plot(harm.loc[a:b].index, harm.loc[a:b].values,
+                 label="harmonic", linewidth=0.6, alpha=0.6)
+        ax.plot(backup.loc[a:b].index, backup.loc[a:b].values,
+                 label="MAL/SF/harmonic backup", linewidth=1.0, color="C2")
+        ax.plot(corrected.loc[a:b].index, corrected.loc[a:b].values,
+                 label="corrected (output)", linewidth=1.3, color="black")
+        ax.axvspan(s, e, color="orange", alpha=0.12, label="backup-filled span")
+        ax.set_ylabel("Water level (ft)")
+        ax.set_xlabel("Date")
+        ax.set_title(
+            f"Backup-filled span {s} -> {e}  ({int(backup_filled.loc[s:e].sum())} samples)\n"
+            "DWR and NOAA both unavailable; reconstructed from MAL/SF/harmonic"
+        )
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fname = out / f"martinez_backupfill_{s:%Y%m%d_%H%M}.png"
+        fig.savefig(fname, dpi=150)
+        plt.close(fig)
+        written.append(fname)
+        print(f"[backup-fill] wrote detail plot: {fname}")
+    return written
+
+
 def run(show: bool = True, output=None, plot_orig: bool = False):
     p = Params()
     out = paths.output_dir(output)
@@ -742,7 +804,53 @@ def run(show: bool = True, output=None, plot_orig: bool = False):
             n_pass, OUT_FLAGS,
         )
 
-
+    # 9b-ter) Backup reconstruction when NOAA (mrz2) has nothing to fill from.
+    #
+    # dwr_corrected is still NaN wherever the NOAA-based neighbor fill (9b) had
+    # no NOAA data to draw on over the same span as a DWR gap/QA mask (e.g. a
+    # DWR outage that coincides with a multi-week NOAA outage). MAL and SF are
+    # fetched for the full record (not just pre-2014), so the historical
+    # pre-NOAA technique -- MAL subtidal substitution + SF DFM smoothing +
+    # harmonic residual interpolation (see mrz_legacy_fill.neighbor_style_fill)
+    # -- can reconstruct these spans too. ts_blend prioritizes dwr_corrected
+    # and only draws on the backup where it is missing, ramping in/out over
+    # backup_blend_win so the seam between the two techniques isn't a hard jump.
+    backup_filled = pd.Series(False, index=idx, dtype=bool)
+    if dwr_corrected.isna().any():
+        sf = _read_series(SF_FILE, "value").reindex(idx)
+        mal = _read_series(MAL_FILE, "value").reindex(idx)
+        backup = neighbor_style_fill(
+            z_dwr_u_raw,
+            mal=mal,
+            sf=sf,
+            harm=z_harm_u,
+            dfm_yaml=str(paths.DFM_PARAMS),
+            subtidal_filter=p.subtidal_filter,
+        )
+        was_nan = dwr_corrected.isna()
+        dwr_corrected = ts_blend(
+            [dwr_corrected, backup], blend_length=p.backup_blend_win, names="value",
+        )
+        backup_filled = was_nan & dwr_corrected.notna()
+        n_backup = int(backup_filled.sum())
+        if n_backup:
+            logger.info(
+                "backup reconstruction (MAL/SF/harmonic): rescued %d sample(s) "
+                "where DWR and NOAA were both unavailable; see 'backup_filled' "
+                "in %s.",
+                n_backup, OUT_FLAGS,
+            )
+            if plot_orig:
+                _plot_backup_filled_gaps(
+                    out,
+                    backup_filled,
+                    merge_gap=p.merge_gap,
+                    dwr_raw=z_dwr_u_raw,
+                    noaa=z_noaa_u,
+                    harm=z_harm_u,
+                    backup=backup,
+                    corrected=dwr_corrected,
+                )
 
     # 9c) Gap check + attribution on the corrected series.
     # This series feeds the final product; NaNs here propagate to the model
@@ -850,6 +958,7 @@ def run(show: bool = True, output=None, plot_orig: bool = False):
             "bad_dwr": combined,
             "bad_dwr_fill": combined_fill,  # expanded for filling
             "passthrough_noaa_gap": passthrough_noaa_gap,  # DWR passed through where offset undefined
+            "backup_filled": backup_filled,  # MAL/SF/harmonic backup where NOAA had nothing to fill
             "mrz_elev_masked": dwr_masked,
             "mrz_elev_corrected": dwr_corrected,
             # Canonical alias for downstream stitching:
